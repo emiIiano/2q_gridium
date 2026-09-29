@@ -161,3 +161,51 @@ Other questions:
 - Why does the x90_state_populations.png graph look so much worse than the x180_state_populations.png graph? Moreover, for the reported fidelity, can you take it to be the peak fidelity rather than the final fidelity? We can and should always cutoff our simulation at whichever time point reports the highest fidelity, which in this case, appears to be sooner than the last time step.
 
 ---
+
+## Work Block — 2026-09-28
+
+Completed: I went back through the four-mode results specifically around the concerns you raised. A few of our previous statements were too strong. In particular, `k=180` should be treated as our current reference endpoint rather than an oracle/ground truth, and the `N=51 -> 71` comparison shows that states 7 and 8 are encouragingly stable but does not yet establish full spatial convergence or robustness to omitted circuit parasitics. The `0 -> 7 -> 8 -> 1` pathway was not chosen beforehand for a physical reason; it emerged as the strongest three-step pathway under the four-mode `grid_phi` matrix-element ranking. The earlier `0 -> 5 -> 4 -> 1` pathway belonged to the symmetric one-mode `IdealGridium` model, and I should have made that model/pathway transition explicit before using the new route.
+
+I also audited the earlier gate results. The ~99.23% X90 and ~98.67% X180 results were optimized and validated in the symmetric one-mode model. The recent ~36.6% X90 result was an unoptimized pulse transplant into the asymmetric four-mode model, so it should be interpreted only as a diagnostic that the one-mode pulse does not directly transfer. I also reran the frozen one-mode trajectories while retaining the full propagator as a function of time. The original X90 trajectory reaches `F_gate = 0.999967` at `32.2405 ns`, and X180 reaches `F_gate = 0.999987` at `16.2472 ns`, substantially before their nominal endpoints. These are not yet validated shorter gates because simply changing `T_gate` would rescale the cosine envelope; they need a defined truncation/envelope convention and revalidation before replacing the existing durations.
+
+The tracked `Figures/Rabi_3Photon/README.md` now serves as an output manifest, including which results are on GitHub and which raw checkpoints are still local-only. I also replaced the ambiguous “smoke trace” interpretation in our working terminology: those calculations are diagnostic propagations/control-plumbing tests, not validated gates.
+
+### Responses to your questions
+
+- **What do the model variables mean?** 
+
+- `EJ`, `EC`, `EL`, `ELK`, `EJS`, and `ECS` are the Josephson, charging, and inductive energies of the KITE/S branches; `eC` and `eP` parameterize the cross-KITE and fourth-node parasitic capacitances in energy form; `eps_J` and `eps_LK` are fractional branch asymmetries; `ng`, `phi_ext`, and `theta_ext` are bias coordinates. `n1max`, `N2`, `N3`, `L2`, `L3`, and `N4` are basis/grid cutoffs, while `k`, `sigma`, `which`, `tol`, and `MMD_AT_PLUS_A` are eigensolver/truncation parameters. I can expand any of these further if useful.
+
+- **Why `0 -> 7 -> 8 -> 1`?** 
+
+In the asymmetric four-mode model we ranked all three-step paths by the product of the three `grid_phi` matrix elements. `0 -> 7 -> 8 -> 1` was the numerical winner by a large margin at both N=51 and N=71. That establishes it as a strong candidate within the present model, not yet as the physically safest path.
+
+- **Where is the convergence evidence for states 7 and 8?** 
+
+The retained-basis tests show strong convergence toward the current k=180 parent, and the N=51 -> 71 spatial comparison gives state overlaps of about `0.99959` and `0.99907`. Their transition frequencies still shift by about `3.84 MHz` and `6.20 MHz`, respectively, so I would not yet call them fully spatially converged.
+
+- **Why N=51 and N=71?** 
+
+They were practical finite-difference resolutions, with N=71 chosen as the next affordable refinement. They were not selected as part of a formal multi-point extrapolation sequence.
+
+- **Why k=180?** 
+
+We had used k=180 as the largest available same-model reference and compared smaller retained spaces against it. That does not prove k=180 itself is converged. Your suggestion of a larger k>200 parent is the cleaner test, and I agree that should be the next large calculation.
+
+- **Where are the outputs?** 
+
+The tracked output inventory is now in `Figures/Rabi_3Photon/README.md`. The one-mode validation and derived diagnostics are visible there. The raw N51/N71 eigensystem checkpoints are still local/ignored because of their size; the manifest now explicitly marks that distinction.
+
+- **What did “smoke traces” mean?** T
+
+hey were control-plumbing / diagnostic propagations used to verify that the projected operator, normalization, solver, and pulse wiring were working. I agree the term is unclear and will not use it for research-facing results.
+
+- **Why does X90 look worse than X180?** 
+
+The X90 pulse is longer and passes through a near-complete swap before rotating back toward the intended X90 operation, which makes its population trajectory look more oscillatory. It actually has lower leakage than X180.
+
+- **Peak versus final fidelity:** 
+
+I agree that the useful gate endpoint should be chosen around the fidelity maximum rather than automatically taking the end of an oversized trajectory. The frozen trajectories reach `0.999967` (X90) and `0.999987` (X180) substantially before their nominal endpoints. I am treating those as candidate endpoints for now rather than validated new gate durations, because the pulse-envelope convention has to be defined and revalidated.
+
+Next: Finish and run a larger asymmetric N=71 `k>200` reference on Lawrencium, with same-parent comparisons at `k=180`, `200`, and the larger endpoint. The direct quantities I plan to compare are `f07`, `f08`, state-7/8 overlaps, the three `grid_phi` matrix elements along `0 -> 7 -> 8 -> 1`, and the pathway ranking. Only after that would I return to four-mode gate optimization.
