@@ -17,6 +17,7 @@ Simulations/Rabi_3photon/
 !Simulations/Rabi_3Photon/
 Simulations/Rabi_3Photon/*
 !Simulations/Rabi_3Photon/generate_validation_artifacts.py
+!Simulations/Rabi_3Photon/generate_fidelity_vs_time_artifacts.py
 !Simulations/Rabi_3Photon/four_mode_control_audit.py
 !Simulations/Rabi_3Photon/four_mode_retained_basis_audit.py
 !Simulations/Rabi_3Photon/four_mode_asymmetric_shell_audit.py
