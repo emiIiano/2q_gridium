@@ -221,3 +221,11 @@ OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
 python -m Simulations.Rabi_3Photon.run_four_mode_spatial71_reference \
   --profile n71-k220 \
   --dry-run
+
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+python -m Simulations.Rabi_3Photon.run_four_mode_spatial71_reference \
+  --profile n71-k220 \
+  --execute \
+  --output-root research/checkpoints \
+  --n51-checkpoint research/checkpoints/2026-09-26-asymmetric-n51 \
+  2>&1 | tee lawrencium-k220.log
