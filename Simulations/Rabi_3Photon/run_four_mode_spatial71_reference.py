@@ -1,8 +1,9 @@
-"""Portable, fail-closed runner for the frozen asymmetric N=71 reference.
+"""Portable, fail-closed runner for frozen asymmetric N=71 references.
 
-This module prepares exactly one expensive Stage-1 solve.  The full k=180
-oracle, the nested asymmetric k=170/k=172/k=175 retained-basis audits, and
-the N=51 -> N=71 spatial comparison all derive from that same solve.
+Each named profile prepares exactly one expensive Stage-1 solve.  Its full
+parent reference, nested retained-basis audits, and the N=51 -> N=71 spatial
+comparison all derive from that same solve.  The larger parent is a reference
+endpoint for the configured comparison, not ground truth or an oracle.
 
 Execution is deliberately guarded by ``--execute``.  Importing the module or
 using ``--dry-run`` never assembles the Hamiltonian and never calls ARPACK.
@@ -48,7 +49,7 @@ DEFAULT_OUTPUT_ROOT = ROOT / 'research' / 'checkpoints'
 DEFAULT_N51_CHECKPOINT = (
     DEFAULT_OUTPUT_ROOT / '2026-09-26-asymmetric-n51'
 )
-FINAL_DIRECTORY_NAME = 'four-mode-asymmetric-n71-k180'
+DEFAULT_PROFILE_NAME = 'n71-k180'
 NSTATES = 11
 
 PHYSICAL_PARAMETERS = {
@@ -82,7 +83,7 @@ N51_SPATIAL_CUTOFFS = {
     'L3': 14.0,
     'N4': 8,
 }
-SOLVER_SETTINGS = {
+N51_SOLVER_SETTINGS = {
     'k': 180,
     'sigma': -24.0,
     'which': 'LM',
@@ -91,11 +92,53 @@ SOLVER_SETTINGS = {
     'v0': None,
     'permc_spec': 'MMD_AT_PLUS_A',
 }
-FROZEN_CONFIGURATION = {
-    'physical_parameters': PHYSICAL_PARAMETERS,
-    'spatial_cutoffs': SPATIAL_CUTOFFS,
-    'solver_settings': SOLVER_SETTINGS,
+PROFILE_DEFINITIONS = {
+    'n71-k180': {
+        'configuration': {
+            'physical_parameters': PHYSICAL_PARAMETERS,
+            'spatial_cutoffs': SPATIAL_CUTOFFS,
+            'solver_settings': deepcopy(N51_SOLVER_SETTINGS),
+        },
+        'retained_cases': (
+            ('asymmetric_priority_k170', 170),
+            ('asymmetric_priority_k172', 172),
+            ('asymmetric_priority_k175', 175),
+        ),
+        'retained_index_mode': 'asymmetric_shell_priority',
+        'final_directory_name': 'four-mode-asymmetric-n71-k180',
+    },
+    'n71-k220': {
+        'configuration': {
+            'physical_parameters': PHYSICAL_PARAMETERS,
+            'spatial_cutoffs': SPATIAL_CUTOFFS,
+            'solver_settings': {
+                'k': 220,
+                'sigma': -24.0,
+                'which': 'LM',
+                'tol': 1e-8,
+                'ncv': None,
+                'v0': None,
+                'permc_spec': 'MMD_AT_PLUS_A',
+            },
+        },
+        'retained_cases': (
+            ('nested_prefix_k180', 180),
+            ('nested_prefix_k200', 200),
+            ('nested_prefix_k220', 220),
+        ),
+        'retained_index_mode': 'prefix',
+        'final_directory_name': 'four-mode-asymmetric-n71-k220',
+    },
 }
+# Legacy aliases preserve the original import-level API and the default k=180
+# profile.  New code resolves settings through ``profile_definition``.
+FROZEN_CONFIGURATION = PROFILE_DEFINITIONS[
+    DEFAULT_PROFILE_NAME
+]['configuration']
+SOLVER_SETTINGS = FROZEN_CONFIGURATION['solver_settings']
+FINAL_DIRECTORY_NAME = PROFILE_DEFINITIONS[
+    DEFAULT_PROFILE_NAME
+]['final_directory_name']
 EXPECTED_STAGE1_DIMENSION = (
     (2 * SPATIAL_CUTOFFS['n1max'] + 1)
     * SPATIAL_CUTOFFS['N2']
@@ -163,18 +206,51 @@ def configuration_fingerprint(configuration=FROZEN_CONFIGURATION):
     return hashlib.sha256(_canonical_json(configuration).encode()).hexdigest()
 
 
-CONFIGURATION_SHA256 = configuration_fingerprint()
+CONFIGURATION_SHA256_BY_PROFILE = {
+    name: configuration_fingerprint(definition['configuration'])
+    for name, definition in PROFILE_DEFINITIONS.items()
+}
+CONFIGURATION_SHA256 = CONFIGURATION_SHA256_BY_PROFILE[DEFAULT_PROFILE_NAME]
 
 
-def validate_frozen_configuration(configuration):
+def profile_definition(profile_name=DEFAULT_PROFILE_NAME):
+    try:
+        return PROFILE_DEFINITIONS[profile_name]
+    except KeyError as error:
+        choices = ', '.join(sorted(PROFILE_DEFINITIONS))
+        raise ValueError(
+            f'Unknown frozen profile {profile_name!r}; choose from {choices}.'
+        ) from error
+
+
+def validate_frozen_configuration(configuration,
+                                  profile_name=DEFAULT_PROFILE_NAME):
     """Reject any physical, spatial, or solver mismatch before a solve."""
-    if _canonical_json(configuration) != _canonical_json(FROZEN_CONFIGURATION):
+    expected = profile_definition(profile_name)['configuration']
+    if _canonical_json(configuration) != _canonical_json(expected):
         raise ValueError(
             'Configuration does not exactly match the frozen asymmetric N=71 '
-            'eigenproblem.'
+            f'{profile_name} eigenproblem.'
         )
-    if configuration_fingerprint(configuration) != CONFIGURATION_SHA256:
+    if (configuration_fingerprint(configuration)
+            != CONFIGURATION_SHA256_BY_PROFILE[profile_name]):
         raise ValueError('Frozen-configuration fingerprint mismatch.')
+
+
+def _profile_for_checkpoint(configuration, fingerprint, declared_profile=None):
+    candidates = (
+        (declared_profile,) if declared_profile is not None
+        else tuple(PROFILE_DEFINITIONS)
+    )
+    for profile_name in candidates:
+        if profile_name not in PROFILE_DEFINITIONS:
+            continue
+        expected = profile_definition(profile_name)['configuration']
+        if (_canonical_json(configuration) == _canonical_json(expected)
+                and fingerprint
+                == CONFIGURATION_SHA256_BY_PROFILE[profile_name]):
+            return profile_name
+    raise ValueError('Checkpoint configuration fingerprint mismatch.')
 
 
 def _utc_now():
@@ -256,26 +332,39 @@ def validate_thread_environment(environment=None):
 
 
 def dry_run_manifest(output_root=DEFAULT_OUTPUT_ROOT,
-                     n51_checkpoint=DEFAULT_N51_CHECKPOINT):
+                     n51_checkpoint=DEFAULT_N51_CHECKPOINT,
+                     profile_name=DEFAULT_PROFILE_NAME):
     """Return the exact job description without assembling a matrix."""
-    validate_frozen_configuration(FROZEN_CONFIGURATION)
+    profile = profile_definition(profile_name)
+    configuration = profile['configuration']
+    validate_frozen_configuration(configuration, profile_name)
+    spatial = configuration['spatial_cutoffs']
+    parent_k = configuration['solver_settings']['k']
     return {
         'mode': 'dry-run-no-matrix-assembly',
-        'configuration': deepcopy(FROZEN_CONFIGURATION),
-        'configuration_sha256': CONFIGURATION_SHA256,
-        'expected_stage1_dimension': EXPECTED_STAGE1_DIMENSION,
+        'profile': profile_name,
+        'configuration': deepcopy(configuration),
+        'configuration_sha256': CONFIGURATION_SHA256_BY_PROFILE[
+            profile_name
+        ],
+        'expected_stage1_dimension': _stage1_dimension(spatial),
+        'parent_k': parent_k,
+        'expected_stage2_parent_dimension': parent_k * spatial['N4'],
         'expected_low_energy_states': NSTATES,
         'candidate_stage1_indices': {
-            name: retained_indices(dimension).tolist()
-            for name, dimension in (
-                ('asymmetric_priority_k170', 170),
-                ('asymmetric_priority_k172', 172),
-                ('asymmetric_priority_k175', 175),
-            )
+            name: retained_indices(dimension, profile_name).tolist()
+            for name, dimension in profile['retained_cases']
         },
+        'retained_stage1_dimensions': [
+            dimension for _, dimension in profile['retained_cases']
+        ],
+        'reference_semantics': (
+            f'k={parent_k} is the larger reference endpoint for nested '
+            'same-parent comparisons; it is not ground truth or an oracle'
+        ),
         'n51_checkpoint': str(Path(n51_checkpoint)),
         'final_output_directory': str(
-            Path(output_root) / FINAL_DIRECTORY_NAME
+            Path(output_root) / profile['final_directory_name']
         ),
         'required_thread_environment': REQUIRED_THREAD_ENVIRONMENT,
         'state_assignment_claim_warning_thresholds': {
@@ -288,22 +377,53 @@ def dry_run_manifest(output_root=DEFAULT_OUTPUT_ROOT,
             'matching configuration_sha256',
             'COMPLETE marker written last',
         ],
+        'expected_checkpoint_files': [
+            'run_state.json',
+            'stage1_eigensystem.npz',
+            'projected_operators.npz',
+            'analysis.json',
+            'checkpoint.json',
+            'COMPLETE',
+        ],
     }
 
 
-def retained_indices(dimension):
-    if dimension not in (170, 172, 175):
-        raise ValueError('Only the frozen k170, k172, and k175 candidates exist.')
-    extras = sorted(ASYMMETRIC_SHELL_PRIORITY[:dimension - 160])
-    indices = np.asarray(list(range(160)) + extras, dtype=int)
+def _stage1_dimension(spatial_cutoffs):
+    return (
+        (2 * spatial_cutoffs['n1max'] + 1)
+        * spatial_cutoffs['N2']
+        * spatial_cutoffs['N3']
+    )
+
+
+def retained_indices(dimension, profile_name=DEFAULT_PROFILE_NAME):
+    profile = profile_definition(profile_name)
+    allowed = tuple(value for _, value in profile['retained_cases'])
+    if dimension not in allowed:
+        choices = ', '.join(f'k{value}' for value in allowed)
+        raise ValueError(
+            f'Only the frozen {profile_name} candidates {choices} exist.'
+        )
+    if profile['retained_index_mode'] == 'prefix':
+        indices = np.arange(dimension, dtype=int)
+    elif profile['retained_index_mode'] == 'asymmetric_shell_priority':
+        extras = sorted(ASYMMETRIC_SHELL_PRIORITY[:dimension - 160])
+        indices = np.asarray(list(range(160)) + extras, dtype=int)
+    else:
+        raise ValueError('Frozen retained-index mode is invalid.')
     if len(indices) != dimension or len(np.unique(indices)) != dimension:
         raise AssertionError('Asymmetric retained-basis definition is invalid.')
+    parent_k = profile['configuration']['solver_settings']['k']
+    if np.any(indices < 0) or np.any(indices >= parent_k):
+        raise AssertionError('Retained indices exceed the frozen parent solve.')
     return indices
 
 
-def _assemble_stage1():
-    parameters = PHYSICAL_PARAMETERS
-    spatial = SPATIAL_CUTOFFS
+def _assemble_stage1(profile_name=DEFAULT_PROFILE_NAME):
+    configuration = profile_definition(profile_name)['configuration']
+    parameters = configuration['physical_parameters']
+    spatial = configuration['spatial_cutoffs']
+    expected_dimension = _stage1_dimension(spatial)
     ECm, K, EJ1, EJ2 = _coeffs(
         parameters['EJ'], parameters['EC'], parameters['EL'],
         parameters['ELK'], parameters['EJS'], parameters['ECS'],
@@ -316,19 +436,24 @@ def _assemble_stage1():
         spatial['n1max'], spatial['N2'], spatial['L2'], spatial['N3'],
         spatial['L3'],
     )
-    if matrix.shape != (EXPECTED_STAGE1_DIMENSION, EXPECTED_STAGE1_DIMENSION):
+    if matrix.shape != (expected_dimension, expected_dimension):
         raise ValueError(
             f'Unexpected Stage-1 shape {matrix.shape}; expected '
-            f'{EXPECTED_STAGE1_DIMENSION} squared.'
+            f'{expected_dimension} squared.'
         )
     return ECm, K, matrix, raw_operators
 
 
-def _validate_eigensystem(matrix, values, vectors):
-    k = SOLVER_SETTINGS['k']
+def _validate_eigensystem(matrix, values, vectors,
+                          profile_name=DEFAULT_PROFILE_NAME):
+    configuration = profile_definition(profile_name)['configuration']
+    k = configuration['solver_settings']['k']
+    expected_dimension = _stage1_dimension(
+        configuration['spatial_cutoffs']
+    )
     if values.shape != (k,):
         raise ValueError(f'Expected {k} eigenvalues, received {values.shape}.')
-    if vectors.shape != (EXPECTED_STAGE1_DIMENSION, k):
+    if vectors.shape != (expected_dimension, k):
         raise ValueError(f'Unexpected eigenvector shape {vectors.shape}.')
     if not np.all(np.isfinite(values)) or not np.all(np.isfinite(vectors)):
         raise ValueError('Stage-1 eigensystem contains non-finite entries.')
@@ -354,7 +479,7 @@ def _validate_eigensystem(matrix, values, vectors):
     return residuals, float(orthogonality)
 
 
-def _project_operators(raw, vectors):
+def _project_operators(raw, vectors, profile_name=DEFAULT_PROFILE_NAME):
     kron3 = raw['kron3']
 
     def projected(operator):
@@ -370,19 +495,23 @@ def _project_operators(raw, vectors):
         'x3': projected(kron3(
             raw['I1'], raw['I2'], sps.diags(raw['x3']))),
     }
-    expected = (SOLVER_SETTINGS['k'], SOLVER_SETTINGS['k'])
+    parent_k = profile_definition(
+        profile_name
+    )['configuration']['solver_settings']['k']
+    expected = (parent_k, parent_k)
     for name, operator in operators.items():
         if operator.shape != expected or not np.all(np.isfinite(operator)):
             raise ValueError(f'Invalid projected operator {name}.')
     return operators
 
 
-def _solve_stage1_once():
-    validate_frozen_configuration(FROZEN_CONFIGURATION)
+def _solve_stage1_once(profile_name=DEFAULT_PROFILE_NAME):
+    configuration = profile_definition(profile_name)['configuration']
+    validate_frozen_configuration(configuration, profile_name)
     started = time.perf_counter()
-    ECm, K, matrix, raw = _assemble_stage1()
+    ECm, K, matrix, raw = _assemble_stage1(profile_name)
     assembly_seconds = time.perf_counter() - started
-    settings = SOLVER_SETTINGS
+    settings = configuration['solver_settings']
     values, vectors, diagnostics = _stage1_eigensolve(
         matrix,
         k=settings['k'],
@@ -395,10 +524,10 @@ def _solve_stage1_once():
         collect_diagnostics=True,
     )
     residuals, orthogonality = _validate_eigensystem(
-        matrix, values, vectors,
+        matrix, values, vectors, profile_name,
     )
     projection_started = time.perf_counter()
-    operators = _project_operators(raw, vectors)
+    operators = _project_operators(raw, vectors, profile_name)
     projection_seconds = time.perf_counter() - projection_started
     diagnostics.update({
         'matrix_dimension': int(matrix.shape[0]),
@@ -412,6 +541,7 @@ def _solve_stage1_once():
         'permc_spec': settings['permc_spec'],
         'assembly_seconds': assembly_seconds,
         'projection_seconds': projection_seconds,
+        'eigenpair_residuals': residuals.tolist(),
         'max_eigenpair_residual': float(np.max(residuals)),
         'median_eigenpair_residual': float(np.median(residuals)),
         'orthogonality_residual_inf': orthogonality,
@@ -459,8 +589,91 @@ def _path_pairs(path):
     return list(zip(path[:-1], path[1:]))
 
 
+def _error_pair(candidate, reference):
+    absolute = abs(float(candidate) - float(reference))
+    return {
+        'absolute': absolute,
+        'relative': absolute / abs(float(reference))
+        if abs(float(reference)) > 1e-12 else None,
+    }
+
+
+def _thomas_observables(transitions, matrix, state_overlaps, reference,
+                        parent_k):
+    """Return the explicitly requested same-parent convergence observables."""
+    frequencies = {
+        'f07': float(transitions[7]),
+        'f08': float(transitions[8]),
+    }
+    reference_frequencies = {
+        'f07': float(reference['transitions'][7]),
+        'f08': float(reference['transitions'][8]),
+    }
+    overlaps = {
+        'state7_overlap_vs_parent': float(state_overlaps[7]),
+        'state8_overlap_vs_parent': float(state_overlaps[8]),
+    }
+    reference_overlaps = {
+        'state7_overlap_vs_parent': 1.0,
+        'state8_overlap_vs_parent': 1.0,
+    }
+    grid_phi = {
+        'abs_grid_phi_07': float(abs(matrix[0, 7])),
+        'abs_grid_phi_78': float(abs(matrix[7, 8])),
+        'abs_grid_phi_81': float(abs(matrix[8, 1])),
+    }
+    reference_grid_phi = {
+        'abs_grid_phi_07': float(abs(reference['matrix'][0, 7])),
+        'abs_grid_phi_78': float(abs(reference['matrix'][7, 8])),
+        'abs_grid_phi_81': float(abs(reference['matrix'][8, 1])),
+    }
+    ranked_pathways = [
+        {**row, 'rank': rank}
+        for rank, row in enumerate(
+            _three_step_paths(matrix, NSTATES, count=None), start=1,
+        )
+    ]
+    target_path = [0, 7, 8, 1]
+    target_rank = next(
+        (row['rank'] for row in ranked_pathways
+         if row['path'] == target_path),
+        None,
+    )
+    return {
+        'reference_endpoint': f'k{parent_k}',
+        'reference_semantics': (
+            'larger reference endpoint; not ground truth or an oracle'
+        ),
+        'convergence_scope': (
+            f'agreement toward k{parent_k} does not prove absolute '
+            'convergence'
+        ),
+        'transition_frequencies_GHz': frequencies,
+        'state_tracking': overlaps,
+        'grid_phi_matrix_elements_abs': grid_phi,
+        f'errors_vs_k{parent_k}': {
+            'transition_frequencies_GHz': {
+                name: _error_pair(value, reference_frequencies[name])
+                for name, value in frequencies.items()
+            },
+            'state_tracking': {
+                name: _error_pair(value, reference_overlaps[name])
+                for name, value in overlaps.items()
+            },
+            'grid_phi_matrix_elements_abs': {
+                name: _error_pair(value, reference_grid_phi[name])
+                for name, value in grid_phi.items()
+            },
+        },
+        'leading_pathways': ranked_pathways[:5],
+        'all_ranked_pathways': ranked_pathways,
+        'path_0_7_8_1_rank': target_rank,
+        'path_0_7_8_1_is_rank_1': target_rank == 1,
+    }
+
+
 def _full_stage2(ECm, K, values, operators, n4):
-    indices = np.arange(SOLVER_SETTINGS['k'], dtype=int)
+    indices = np.arange(len(values), dtype=int)
     energies, vectors, tensor, matrix = _stage2_templates(
         ECm, K, values, operators, indices, n4,
     )
@@ -476,17 +689,9 @@ def _full_stage2(ECm, K, values, operators, n4):
     }
 
 
-def _retained_case(label, indices, ECm, K, stage1_values, operators,
-                   reference, n4):
-    values, vectors, tensor, matrix = _stage2_templates(
-        ECm, K, stage1_values, operators, indices, n4,
-    )
-    assignment, overlaps = _track(
-        reference['vectors'], vectors, indices, n4, NSTATES,
-    )
-    values, vectors, tensor, matrix, transitions = _apply_state_assignment(
-        values, vectors, tensor, matrix, assignment,
-    )
+def _case_analysis(label, indices, values, matrix, assignment, overlaps,
+                   reference, parent_k):
+    transitions = values - values[0]
     transition_errors = 1e3 * (
         transitions[1:] - reference['transitions'][1:]
     )
@@ -503,7 +708,7 @@ def _retained_case(label, indices, ECm, K, stage1_values, operators,
         'retained_indices': indices.tolist(),
         'energies_GHz': values.tolist(),
         'transitions_GHz': transitions[1:].tolist(),
-        'transition_errors_MHz_vs_k180': transition_errors.tolist(),
+        f'transition_errors_MHz_vs_k{parent_k}': transition_errors.tolist(),
         'maximum_transition_error_MHz': float(
             np.max(np.abs(transition_errors))
         ),
@@ -531,7 +736,36 @@ def _retained_case(label, indices, ECm, K, stage1_values, operators,
         ),
         'grid_phi_abs': np.abs(matrix).tolist(),
         'pathways': _three_step_paths(matrix, NSTATES),
+        'thomas_observables': _thomas_observables(
+            transitions, matrix, overlaps, reference, parent_k,
+        ),
     }
+
+
+def _retained_case(label, indices, ECm, K, stage1_values, operators,
+                   reference, n4, parent_k):
+    values, vectors, tensor, matrix = _stage2_templates(
+        ECm, K, stage1_values, operators, indices, n4,
+    )
+    assignment, overlaps = _track(
+        reference['vectors'], vectors, indices, n4, NSTATES,
+    )
+    values, vectors, tensor, matrix, _ = _apply_state_assignment(
+        values, vectors, tensor, matrix, assignment,
+    )
+    return _case_analysis(
+        label, indices, values, matrix, assignment, overlaps,
+        reference, parent_k,
+    )
+
+
+def _reference_endpoint_case(label, reference, parent_k):
+    assignment = np.arange(NSTATES, dtype=int)
+    overlaps = np.ones(NSTATES)
+    return _case_analysis(
+        label, reference['indices'], reference['energies'],
+        reference['matrix'], assignment, overlaps, reference, parent_k,
+    )
 
 
 def _validate_n51_metadata(metadata):
@@ -540,7 +774,9 @@ def _validate_n51_metadata(metadata):
     if metadata.get('spatial_cutoffs') != N51_SPATIAL_CUTOFFS:
         raise ValueError('N=51 checkpoint spatial settings do not match.')
     solver = metadata.get('solver', {})
-    for name, expected in SOLVER_SETTINGS.items():
+    # N=51 is an independently pinned k=180 reference.  Its authenticated
+    # solver metadata must not be compared with the selected N=71 parent k.
+    for name, expected in N51_SOLVER_SETTINGS.items():
         observed_name = 'permc_spec' if name == 'permc_spec' else name
         if solver.get(observed_name) != expected:
             raise ValueError(
@@ -576,7 +812,8 @@ def load_verified_n51_checkpoint(checkpoint_dir=DEFAULT_N51_CHECKPOINT):
                        for name, path in paths.items()}
     if observed_hashes != N51_ORACLE_SHA256:
         raise ValueError(
-            'N=51 checkpoint bytes do not match the verified asymmetric oracle.'
+            'N=51 checkpoint bytes do not match the verified asymmetric '
+            'reference.'
         )
     metadata = json.loads(metadata_path.read_text())
     _validate_n51_metadata(metadata)
@@ -592,11 +829,13 @@ def load_verified_n51_checkpoint(checkpoint_dir=DEFAULT_N51_CHECKPOINT):
         * N51_SPATIAL_CUTOFFS['N2']
         * N51_SPATIAL_CUTOFFS['N3']
     )
-    if values.shape != (180,) or vectors.shape != (expected_dimension, 180):
+    n51_parent_k = N51_SOLVER_SETTINGS['k']
+    if (values.shape != (n51_parent_k,)
+            or vectors.shape != (expected_dimension, n51_parent_k)):
         raise ValueError('N=51 checkpoint has incompatible Stage-1 shapes.')
-    if residuals.shape != (180,):
+    if residuals.shape != (n51_parent_k,):
         raise ValueError('N=51 checkpoint residual vector has wrong shape.')
-    if any(operators[name].shape != (180, 180)
+    if any(operators[name].shape != (n51_parent_k, n51_parent_k)
            for name in EXPECTED_OPERATOR_NAMES):
         raise ValueError('N=51 projected operators have incompatible shapes.')
     if not all(np.all(np.isfinite(array)) for array in (
@@ -967,12 +1206,13 @@ def annotate_pathway_claims(pathways, confidence_rows, clusters):
     return annotated
 
 
-def _cross_grid_analysis(n51, n71_vectors, n51_reference, n71_reference):
+def _cross_grid_analysis(n51, n71_vectors, n51_reference, n71_reference,
+                         n71_spatial=SPATIAL_CUTOFFS):
     raw51 = reconstruct_raw_final_states(
         n51['vectors'], n51_reference['tensor'],
     )
     mapped51 = interpolate_raw_states(
-        raw51, N51_SPATIAL_CUTOFFS, SPATIAL_CUTOFFS,
+        raw51, N51_SPATIAL_CUTOFFS, n71_spatial,
     )
     raw71 = reconstruct_raw_final_states(
         n71_vectors, n71_reference['tensor'],
@@ -1088,19 +1328,28 @@ def _cross_grid_analysis(n51, n71_vectors, n51_reference, n71_reference):
 
 
 def analyze_same_solve(ECm, K, n71_values, n71_vectors, n71_operators,
-                       n51_checkpoint=DEFAULT_N51_CHECKPOINT):
-    n4 = SPATIAL_CUTOFFS['N4']
+                       n51_checkpoint=DEFAULT_N51_CHECKPOINT,
+                       profile_name=DEFAULT_PROFILE_NAME):
+    profile = profile_definition(profile_name)
+    configuration = profile['configuration']
+    spatial_cutoffs = configuration['spatial_cutoffs']
+    parent_k = configuration['solver_settings']['k']
+    n4 = spatial_cutoffs['N4']
     reference71 = _full_stage2(
         ECm, K, n71_values, n71_operators, n4,
     )
     candidates = {}
-    for dimension in (170, 172, 175):
-        label = f'asymmetric_priority_k{dimension}'
-        indices = retained_indices(dimension)
-        candidates[label] = _retained_case(
-            label, indices, ECm, K, n71_values, n71_operators,
-            reference71, n4,
-        )
+    for label, dimension in profile['retained_cases']:
+        indices = retained_indices(dimension, profile_name)
+        if dimension == parent_k:
+            candidates[label] = _reference_endpoint_case(
+                label, reference71, parent_k,
+            )
+        else:
+            candidates[label] = _retained_case(
+                label, indices, ECm, K, n71_values, n71_operators,
+                reference71, n4, parent_k,
+            )
 
     n51 = load_verified_n51_checkpoint(n51_checkpoint)
     reference51 = _full_stage2(
@@ -1108,20 +1357,35 @@ def analyze_same_solve(ECm, K, n71_values, n71_vectors, n71_operators,
         N51_SPATIAL_CUTOFFS['N4'],
     )
     spatial = _cross_grid_analysis(
-        n51, n71_vectors, reference51, reference71,
+        n51, n71_vectors, reference51, reference71, spatial_cutoffs,
     )
-    return {
-        'configuration_sha256': CONFIGURATION_SHA256,
+    result = {
+        'profile': profile_name,
+        'configuration_sha256': CONFIGURATION_SHA256_BY_PROFILE[
+            profile_name
+        ],
         'control_operator': 'grid_phi = theta3 + theta2/2',
-        'stage1_oracle_reuse': (
-            'k180, k170, k172, and k175 Stage-2 analyses all use the same '
-            'single N=71 Stage-1 k180 solve'
+        'reference_endpoint_semantics': (
+            f'k{parent_k} is the larger reference endpoint for this '
+            'same-parent comparison; it is not ground truth or an oracle'
         ),
-        'n71_reference_k180': {
+        'stage1_parent_reuse': (
+            f'parent k{parent_k} and retained '
+            + ', '.join(f'k{dimension}' for _, dimension in profile[
+                'retained_cases'
+            ])
+            + f' Stage-2 analyses all use the same single N=71 Stage-1 '
+            f'k{parent_k} solve'
+        ),
+        f'n71_reference_k{parent_k}': {
             'energies_GHz': reference71['energies'].tolist(),
             'transitions_GHz': reference71['transitions'][1:].tolist(),
             'grid_phi_abs': np.abs(reference71['matrix']).tolist(),
             'pathways': reference71['pathways'],
+            'thomas_observables': _thomas_observables(
+                reference71['transitions'], reference71['matrix'],
+                np.ones(NSTATES), reference71, parent_k,
+            ),
             'logical_to_excited': {
                 str(logical): sorted([
                     {
@@ -1147,24 +1411,43 @@ def analyze_same_solve(ECm, K, n71_values, n71_vectors, n71_operators,
             'deferred for scientific review; this runner records data only'
         ),
     }
+    if profile_name == DEFAULT_PROFILE_NAME:
+        result['stage1_oracle_reuse'] = (
+            'k180, k170, k172, and k175 Stage-2 analyses all use the same '
+            'single N=71 Stage-1 k180 solve'
+        )
+    return result
 
 
-def _completion_payload(checkpoint_sha256):
-    return {
+def _completion_payload(checkpoint_sha256, configuration_sha256,
+                        profile_name=None):
+    payload = {
         'status': 'complete',
-        'configuration_sha256': CONFIGURATION_SHA256,
+        'configuration_sha256': configuration_sha256,
         'checkpoint_sha256': checkpoint_sha256,
         'completed_utc': _utc_now(),
     }
+    if profile_name is not None:
+        payload['profile'] = profile_name
+    return payload
 
 
-def _validate_checkpoint_payload(checkpoint_dir, metadata):
+def _validate_checkpoint_payload(checkpoint_dir, metadata,
+                                 profile_name=None):
     checkpoint_dir = Path(checkpoint_dir)
     if metadata.get('status') != 'complete':
         raise ValueError('Checkpoint status is not complete.')
-    if metadata.get('configuration_sha256') != CONFIGURATION_SHA256:
-        raise ValueError('Checkpoint configuration fingerprint mismatch.')
-    validate_frozen_configuration(metadata.get('configuration'))
+    declared_profile = metadata.get('profile', profile_name)
+    resolved_profile = _profile_for_checkpoint(
+        metadata.get('configuration'),
+        metadata.get('configuration_sha256'),
+        declared_profile,
+    )
+    if profile_name is not None and resolved_profile != profile_name:
+        raise ValueError('Checkpoint profile does not match the request.')
+    validate_frozen_configuration(
+        metadata.get('configuration'), resolved_profile,
+    )
     required_files = {
         'stage1_eigensystem.npz',
         'projected_operators.npz',
@@ -1177,6 +1460,7 @@ def _validate_checkpoint_payload(checkpoint_dir, metadata):
         path = checkpoint_dir / name
         if not path.is_file() or _sha256_file(path) != expected_hash:
             raise ValueError(f'Checkpoint file hash mismatch: {name}.')
+    return resolved_profile
 
 
 def publish_checkpoint_directory(incomplete_dir, final_dir):
@@ -1189,11 +1473,14 @@ def publish_checkpoint_directory(incomplete_dir, final_dir):
         raise FileNotFoundError(incomplete_dir)
     checkpoint_path = incomplete_dir / 'checkpoint.json'
     checkpoint = json.loads(checkpoint_path.read_text())
-    _validate_checkpoint_payload(incomplete_dir, checkpoint)
+    profile_name = _validate_checkpoint_payload(incomplete_dir, checkpoint)
     checkpoint_sha256 = _sha256_file(checkpoint_path)
     os.replace(incomplete_dir, final_dir)
     _atomic_write_json(
-        final_dir / 'COMPLETE', _completion_payload(checkpoint_sha256),
+        final_dir / 'COMPLETE', _completion_payload(
+            checkpoint_sha256, checkpoint['configuration_sha256'],
+            profile_name if checkpoint.get('profile') is not None else None,
+        ),
     )
     return final_dir
 
@@ -1207,47 +1494,62 @@ def validate_complete_checkpoint_directory(checkpoint_dir):
         raise ValueError('Checkpoint is incomplete: metadata/COMPLETE missing.')
     marker = json.loads(marker_path.read_text())
     metadata = json.loads(metadata_path.read_text())
+    profile_name = _profile_for_checkpoint(
+        metadata.get('configuration'),
+        metadata.get('configuration_sha256'),
+        metadata.get('profile'),
+    )
+    expected_fingerprint = CONFIGURATION_SHA256_BY_PROFILE[profile_name]
     for document, label in ((marker, 'COMPLETE'), (metadata, 'checkpoint')):
         if document.get('status') != 'complete':
             raise ValueError(f'{label} status is not complete.')
-        if document.get('configuration_sha256') != CONFIGURATION_SHA256:
+        if document.get('configuration_sha256') != expected_fingerprint:
             raise ValueError(f'{label} configuration fingerprint mismatch.')
+        if (document.get('profile') is not None
+                and document.get('profile') != profile_name):
+            raise ValueError(f'{label} profile mismatch.')
     if marker.get('checkpoint_sha256') != _sha256_file(metadata_path):
         raise ValueError('COMPLETE does not authenticate checkpoint.json.')
-    _validate_checkpoint_payload(checkpoint_dir, metadata)
+    _validate_checkpoint_payload(checkpoint_dir, metadata, profile_name)
     return metadata
 
 
 def execute(output_root=DEFAULT_OUTPUT_ROOT,
-            n51_checkpoint=DEFAULT_N51_CHECKPOINT):
+            n51_checkpoint=DEFAULT_N51_CHECKPOINT,
+            profile_name=DEFAULT_PROFILE_NAME):
     """Run exactly one frozen N=71 Stage-1 solve and publish if valid."""
+    profile = profile_definition(profile_name)
+    configuration = profile['configuration']
+    configuration_sha256 = CONFIGURATION_SHA256_BY_PROFILE[profile_name]
     validate_thread_environment()
-    validate_frozen_configuration(FROZEN_CONFIGURATION)
+    validate_frozen_configuration(configuration, profile_name)
     output_root = Path(output_root).resolve()
     n51_checkpoint = Path(n51_checkpoint).resolve()
-    # Validate the comparison oracle before allocating the N=71 matrix.
+    # Authenticate the pinned N=51 comparison before allocating the N=71
+    # matrix.  Its k=180 solver metadata is independent of the N=71 parent k.
     load_verified_n51_checkpoint(n51_checkpoint)
     output_root.mkdir(parents=True, exist_ok=True)
-    final_dir = output_root / FINAL_DIRECTORY_NAME
+    final_dir = output_root / profile['final_directory_name']
     if final_dir.exists():
         raise FileExistsError(f'Refusing to overwrite {final_dir}.')
     incomplete_dir = output_root / (
-        f'.{FINAL_DIRECTORY_NAME}.incomplete-{uuid.uuid4().hex}'
+        f'.{profile["final_directory_name"]}.incomplete-{uuid.uuid4().hex}'
     )
     incomplete_dir.mkdir()
     started = time.perf_counter()
     run_state = {
         'status': 'incomplete',
         'started_utc': _utc_now(),
-        'configuration_sha256': CONFIGURATION_SHA256,
-        'configuration': deepcopy(FROZEN_CONFIGURATION),
+        'profile': profile_name,
+        'configuration_sha256': configuration_sha256,
+        'configuration': deepcopy(configuration),
         'provenance': collect_runtime_provenance(),
     }
     _atomic_write_json(incomplete_dir / 'run_state.json', run_state)
 
     try:
         (ECm, K, values, vectors, operators, residuals,
-         diagnostics) = _solve_stage1_once()
+         diagnostics) = _solve_stage1_once(profile_name)
         np.savez(
             incomplete_dir / 'stage1_eigensystem.npz',
             eigenvalues_GHz=values,
@@ -1259,6 +1561,7 @@ def execute(output_root=DEFAULT_OUTPUT_ROOT,
         )
         analysis = analyze_same_solve(
             ECm, K, values, vectors, operators, n51_checkpoint,
+            profile_name,
         )
         _atomic_write_json(incomplete_dir / 'analysis.json', analysis)
 
@@ -1275,8 +1578,9 @@ def execute(output_root=DEFAULT_OUTPUT_ROOT,
         checkpoint = {
             'status': 'complete',
             'validated_utc': _utc_now(),
-            'configuration': deepcopy(FROZEN_CONFIGURATION),
-            'configuration_sha256': CONFIGURATION_SHA256,
+            'profile': profile_name,
+            'configuration': deepcopy(configuration),
+            'configuration_sha256': configuration_sha256,
             'provenance': run_state['provenance'],
             'generator': (
                 'Simulations/Rabi_3Photon/'
@@ -1338,7 +1642,12 @@ def _parse_arguments(argv=None):
     )
     mode.add_argument(
         '--execute', action='store_true',
-        help='Run the single expensive N=71 k180 calculation.',
+        help='Run the selected frozen N=71 parent calculation.',
+    )
+    parser.add_argument(
+        '--profile', choices=tuple(PROFILE_DEFINITIONS),
+        default=DEFAULT_PROFILE_NAME,
+        help='Frozen named N=71 profile (default: n71-k180).',
     )
     parser.add_argument(
         '--output-root', type=Path, default=DEFAULT_OUTPUT_ROOT,
@@ -1357,16 +1666,22 @@ def main(argv=None):
         print(json.dumps(
             dry_run_manifest(
                 arguments.output_root, arguments.n51_checkpoint,
+                arguments.profile,
             ),
             indent=2,
             allow_nan=False,
         ))
         return 0
-    final_dir = execute(arguments.output_root, arguments.n51_checkpoint)
+    final_dir = execute(
+        arguments.output_root, arguments.n51_checkpoint, arguments.profile,
+    )
     print(json.dumps({
         'status': 'complete',
         'checkpoint': str(final_dir),
-        'configuration_sha256': CONFIGURATION_SHA256,
+        'profile': arguments.profile,
+        'configuration_sha256': CONFIGURATION_SHA256_BY_PROFILE[
+            arguments.profile
+        ],
     }, indent=2))
     return 0
 

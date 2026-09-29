@@ -8,21 +8,31 @@ from Simulations.Rabi_3Photon import run_four_mode_spatial71_reference as runner
 
 
 def _write_complete_fixture(directory, configuration=None,
-                            fingerprint=None):
+                            fingerprint=None, profile_name=None):
     directory.mkdir()
     for name in (
             'stage1_eigensystem.npz',
             'projected_operators.npz',
             'analysis.json'):
         (directory / name).write_bytes(f'fixture:{name}'.encode())
+    if profile_name is None:
+        default_configuration = runner.FROZEN_CONFIGURATION
+        default_fingerprint = runner.CONFIGURATION_SHA256
+    else:
+        default_configuration = runner.profile_definition(
+            profile_name
+        )['configuration']
+        default_fingerprint = runner.CONFIGURATION_SHA256_BY_PROFILE[
+            profile_name
+        ]
     metadata = {
         'status': 'complete',
         'configuration': (
-            runner.FROZEN_CONFIGURATION
+            default_configuration
             if configuration is None else configuration
         ),
         'configuration_sha256': (
-            runner.CONFIGURATION_SHA256
+            default_fingerprint
             if fingerprint is None else fingerprint
         ),
         'file_sha256': {
@@ -34,6 +44,8 @@ def _write_complete_fixture(directory, configuration=None,
             )
         },
     }
+    if profile_name is not None:
+        metadata['profile'] = profile_name
     (directory / 'checkpoint.json').write_text(json.dumps(metadata))
     return metadata
 
@@ -57,6 +69,64 @@ def test_frozen_configuration_and_candidate_definitions():
         160, 162, 163, 165, 166, 167, 168, 169, 170, 171, 172, 173,
         174, 176, 177,
     ]
+
+
+def test_n71_k220_profile_parsing_dimensions_and_nested_prefixes(tmp_path):
+    arguments = runner._parse_arguments([
+        '--profile', 'n71-k220', '--dry-run',
+    ])
+    assert arguments.profile == 'n71-k220'
+    assert arguments.dry_run is True
+
+    manifest = runner.dry_run_manifest(
+        tmp_path, tmp_path / 'n51', 'n71-k220',
+    )
+    assert manifest['profile'] == 'n71-k220'
+    assert manifest['configuration']['solver_settings'] == {
+        'k': 220,
+        'sigma': -24.0,
+        'which': 'LM',
+        'tol': 1e-8,
+        'ncv': None,
+        'v0': None,
+        'permc_spec': 'MMD_AT_PLUS_A',
+    }
+    assert manifest['expected_stage1_dimension'] == 45369
+    assert manifest['parent_k'] == 220
+    assert manifest['expected_stage2_parent_dimension'] == 1760
+    assert manifest['retained_stage1_dimensions'] == [180, 200, 220]
+    assert manifest['candidate_stage1_indices'] == {
+        'nested_prefix_k180': list(range(180)),
+        'nested_prefix_k200': list(range(200)),
+        'nested_prefix_k220': list(range(220)),
+    }
+    assert manifest['final_output_directory'].endswith(
+        'four-mode-asymmetric-n71-k220'
+    )
+    assert manifest['configuration_sha256'] == (
+        '69ee54299c70336f00b06c18250747c2e600b2f48fb9b9365f1651ce57997c39'
+    )
+    assert manifest['configuration_sha256'] != runner.CONFIGURATION_SHA256
+    assert manifest['expected_checkpoint_files'] == [
+        'run_state.json',
+        'stage1_eigensystem.npz',
+        'projected_operators.npz',
+        'analysis.json',
+        'checkpoint.json',
+        'COMPLETE',
+    ]
+
+
+def test_default_n71_k180_profile_behavior_is_unchanged(tmp_path):
+    arguments = runner._parse_arguments(['--dry-run'])
+    assert arguments.profile == 'n71-k180'
+    manifest = runner.dry_run_manifest(tmp_path, tmp_path / 'n51')
+    assert manifest['configuration_sha256'] == runner.CONFIGURATION_SHA256
+    assert manifest['retained_stage1_dimensions'] == [170, 172, 175]
+    assert manifest['expected_stage2_parent_dimension'] == 1440
+    assert manifest['final_output_directory'].endswith(
+        'four-mode-asymmetric-n71-k180'
+    )
 
 
 def test_frozen_physics_and_spatial_parameters_reach_stage1(monkeypatch):
@@ -87,32 +157,43 @@ def test_frozen_physics_and_spatial_parameters_reach_stage1(monkeypatch):
     assert raw == {'sentinel': True}
 
 
-def test_frozen_solver_settings_reach_single_stage1_call(monkeypatch):
+@pytest.mark.parametrize(
+    ('profile_name', 'parent_k'),
+    [('n71-k180', 180), ('n71-k220', 220)],
+)
+def test_frozen_solver_settings_reach_single_stage1_call(
+        monkeypatch, profile_name, parent_k):
     calls = []
 
     monkeypatch.setattr(
         runner, '_assemble_stage1',
-        lambda: (np.eye(4), np.eye(3), sps.eye(1), {}),
+        lambda selected_profile: (
+            np.eye(4), np.eye(3), sps.eye(1), {}
+        ),
     )
 
     def fake_eigensolve(matrix, **settings):
         calls.append(settings)
-        return np.arange(180.0), np.ones((1, 1)), {}
+        return np.arange(float(parent_k)), np.ones((1, 1)), {}
 
     monkeypatch.setattr(runner, '_stage1_eigensolve', fake_eigensolve)
     monkeypatch.setattr(
         runner, '_validate_eigensystem',
-        lambda matrix, values, vectors: (np.zeros(180), 0.0),
+        lambda matrix, values, vectors, selected_profile: (
+            np.zeros(parent_k), 0.0
+        ),
     )
     monkeypatch.setattr(
         runner, '_project_operators',
-        lambda raw, vectors: {name: np.zeros((1, 1))
-                              for name in runner.EXPECTED_OPERATOR_NAMES},
+        lambda raw, vectors, selected_profile: {
+            name: np.zeros((1, 1))
+            for name in runner.EXPECTED_OPERATOR_NAMES
+        },
     )
 
-    runner._solve_stage1_once()
+    runner._solve_stage1_once(profile_name)
     assert calls == [{
-        'k': 180,
+        'k': parent_k,
         'sigma': -24.0,
         'which': 'LM',
         'tol': 1e-8,
@@ -277,8 +358,202 @@ def test_checkpoint_hashes_detect_scientific_and_metadata_corruption(tmp_path):
 def test_n51_loader_rejects_unpinned_bytes_before_using_metadata(tmp_path):
     for name in runner.N51_ORACLE_SHA256:
         (tmp_path / name).write_bytes(b'finite but not the verified oracle')
-    with pytest.raises(ValueError, match='verified asymmetric oracle'):
+    with pytest.raises(ValueError, match='verified asymmetric reference'):
         runner.load_verified_n51_checkpoint(tmp_path)
+
+
+def _valid_n51_metadata():
+    return {
+        'physical_parameters': dict(runner.PHYSICAL_PARAMETERS),
+        'spatial_cutoffs': dict(runner.N51_SPATIAL_CUTOFFS),
+        'solver': {
+            **runner.N51_SOLVER_SETTINGS,
+            'matrix_dimension': 23409,
+            'path': 'explicit_shift_invert',
+            'orthogonality_residual_inf': 1e-12,
+        },
+    }
+
+
+def test_n51_k180_metadata_is_valid_under_n71_k220_parent():
+    assert runner.profile_definition(
+        'n71-k220'
+    )['configuration']['solver_settings']['k'] == 220
+    metadata = _valid_n51_metadata()
+    assert metadata['solver']['k'] == 180
+    runner._validate_n51_metadata(metadata)
+
+
+def test_n51_incorrect_physical_metadata_still_fails_closed():
+    metadata = _valid_n51_metadata()
+    metadata['physical_parameters']['eps_J'] = 0.11
+    with pytest.raises(ValueError, match='physical parameters do not match'):
+        runner._validate_n51_metadata(metadata)
+
+
+def test_n51_incorrect_solver_metadata_still_fails_closed():
+    metadata = _valid_n51_metadata()
+    metadata['solver']['k'] = 220
+    with pytest.raises(ValueError, match='solver mismatch for k'):
+        runner._validate_n51_metadata(metadata)
+
+
+def test_k220_checkpoint_fingerprint_and_output_name_are_profile_specific(
+        tmp_path):
+    incomplete = tmp_path / '.k220.incomplete-fixture'
+    final = tmp_path / 'four-mode-asymmetric-n71-k220'
+    _write_complete_fixture(incomplete, profile_name='n71-k220')
+    runner.publish_checkpoint_directory(incomplete, final)
+
+    metadata = runner.validate_complete_checkpoint_directory(final)
+    assert metadata['profile'] == 'n71-k220'
+    assert metadata['configuration_sha256'] == (
+        runner.CONFIGURATION_SHA256_BY_PROFILE['n71-k220']
+    )
+    marker = json.loads((final / 'COMPLETE').read_text())
+    assert marker['profile'] == 'n71-k220'
+
+
+def test_k220_profile_fingerprint_mismatch_is_rejected(tmp_path):
+    incomplete = tmp_path / '.k220-mismatch.incomplete-fixture'
+    final = tmp_path / 'must-not-exist'
+    _write_complete_fixture(incomplete, profile_name='n71-k220')
+    metadata_path = incomplete / 'checkpoint.json'
+    metadata = json.loads(metadata_path.read_text())
+    metadata['profile'] = 'n71-k180'
+    metadata_path.write_text(json.dumps(metadata))
+
+    with pytest.raises(ValueError, match='fingerprint mismatch'):
+        runner.publish_checkpoint_directory(incomplete, final)
+    assert incomplete.is_dir()
+    assert not final.exists()
+
+
+def test_incomplete_k220_checkpoint_is_rejected(tmp_path):
+    incomplete = tmp_path / 'incomplete-k220'
+    _write_complete_fixture(incomplete, profile_name='n71-k220')
+    with pytest.raises(ValueError, match='COMPLETE missing'):
+        runner.validate_complete_checkpoint_directory(incomplete)
+
+
+def test_k220_analysis_labels_and_thomas_observables_are_reference_aware():
+    energies = np.linspace(0.0, 10.0, runner.NSTATES)
+    transitions = energies - energies[0]
+    matrix = np.ones((runner.NSTATES, runner.NSTATES), dtype=complex)
+    reference = {
+        'transitions': transitions,
+        'matrix': matrix,
+        'pathways': runner._three_step_paths(matrix, runner.NSTATES),
+    }
+    result = runner._case_analysis(
+        'nested_prefix_k180', np.arange(180), energies, matrix,
+        np.arange(runner.NSTATES), np.ones(runner.NSTATES),
+        reference, 220,
+    )
+
+    assert 'transition_errors_MHz_vs_k220' in result
+    assert 'transition_errors_MHz_vs_k180' not in result
+    observables = result['thomas_observables']
+    assert observables['reference_endpoint'] == 'k220'
+    assert observables['transition_frequencies_GHz'] == {
+        'f07': 7.0,
+        'f08': 8.0,
+    }
+    assert observables['state_tracking'] == {
+        'state7_overlap_vs_parent': 1.0,
+        'state8_overlap_vs_parent': 1.0,
+    }
+    assert observables['grid_phi_matrix_elements_abs'] == {
+        'abs_grid_phi_07': 1.0,
+        'abs_grid_phi_78': 1.0,
+        'abs_grid_phi_81': 1.0,
+    }
+    assert len(observables['leading_pathways']) == 5
+    assert len(observables['all_ranked_pathways']) == 72
+    assert [row['rank'] for row in observables['leading_pathways']] == [
+        1, 2, 3, 4, 5,
+    ]
+    assert set(observables['errors_vs_k220']) == {
+        'transition_frequencies_GHz', 'state_tracking',
+        'grid_phi_matrix_elements_abs',
+    }
+    assert observables['path_0_7_8_1_rank'] is not None
+    assert 'does not prove absolute convergence' in (
+        observables['convergence_scope']
+    )
+
+
+def test_nested_k220_cases_reuse_one_parent_without_stage1_solves(
+        monkeypatch):
+    parent_values = np.arange(220.0)
+    full_stage2_calls = []
+    retained_calls = []
+    endpoint_calls = []
+
+    def forbidden_stage1(*args, **kwargs):
+        raise AssertionError('nested analysis launched a Stage-1 solve')
+
+    def fake_full_stage2(ECm, K, values, operators, n4):
+        full_stage2_calls.append(len(values))
+        matrix = np.ones((runner.NSTATES, runner.NSTATES), complex)
+        energies = np.arange(float(runner.NSTATES))
+        return {
+            'indices': np.arange(len(values)),
+            'energies': energies,
+            'vectors': np.zeros((len(values) * n4, runner.NSTATES)),
+            'tensor': np.zeros((len(values), n4, runner.NSTATES)),
+            'matrix': matrix,
+            'transitions': energies - energies[0],
+            'pathways': runner._three_step_paths(
+                matrix, runner.NSTATES,
+            ),
+        }
+
+    def fake_retained(label, indices, ECm, K, stage1_values, operators,
+                      reference, n4, parent_k):
+        assert stage1_values is parent_values
+        retained_calls.append((label, len(indices), parent_k))
+        return {'label': label, 'retained_indices': indices.tolist()}
+
+    def fake_endpoint(label, reference, parent_k):
+        endpoint_calls.append((label, len(reference['indices']), parent_k))
+        return {'label': label, 'retained_indices': reference['indices'].tolist()}
+
+    monkeypatch.setattr(runner, '_solve_stage1_once', forbidden_stage1)
+    monkeypatch.setattr(runner, '_full_stage2', fake_full_stage2)
+    monkeypatch.setattr(runner, '_retained_case', fake_retained)
+    monkeypatch.setattr(
+        runner, '_reference_endpoint_case', fake_endpoint,
+    )
+    monkeypatch.setattr(
+        runner, 'load_verified_n51_checkpoint',
+        lambda checkpoint: {
+            'values': np.arange(180.0),
+            'vectors': np.empty((0, 0)),
+            'operators': {},
+            'metadata': {'solver': {'k': 180}},
+            'file_sha256': {'fixture': 'hash'},
+        },
+    )
+    monkeypatch.setattr(
+        runner, '_cross_grid_analysis', lambda *args, **kwargs: {},
+    )
+
+    result = runner.analyze_same_solve(
+        np.eye(4), np.eye(3), parent_values, np.empty((0, 0)), {},
+        n51_checkpoint='fixture', profile_name='n71-k220',
+    )
+
+    assert full_stage2_calls == [220, 180]
+    assert retained_calls == [
+        ('nested_prefix_k180', 180, 220),
+        ('nested_prefix_k200', 200, 220),
+    ]
+    assert endpoint_calls == [('nested_prefix_k220', 220, 220)]
+    assert set(result['retained_basis_cases']) == {
+        'nested_prefix_k180', 'nested_prefix_k200', 'nested_prefix_k220',
+    }
+    assert 'n71_reference_k220' in result
 
 
 def _sample_analytic_states(spatial):
